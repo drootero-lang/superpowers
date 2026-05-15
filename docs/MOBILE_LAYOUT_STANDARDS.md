@@ -410,6 +410,202 @@ which element is causing overflow.
 
 ---
 
+## CSS Grid Named-Area Mobile Fallback Risks
+
+### The Production Failure Pattern
+
+Named `grid-area` assignments on desktop layouts can cause catastrophic invisible-content failures
+on Safari iOS when the corresponding `grid-template-areas` is absent at smaller breakpoints.
+Desktop layouts appear correct. Mobile shows a solid background with no content.
+
+This was encountered in production on a gallery page with a 3-column named-area grid. On real
+iPhone Safari, the entire gallery section rendered as a blank dark rectangle. No images, no
+captions — only the section background colour. CSS inspection in DevTools showed all `.gp-photo`
+elements at `height: 0px`.
+
+### Root Failure Mode
+
+Named grid areas require a two-part CSS contract:
+
+1. A container defines the named regions: `grid-template-areas: "featured portrait-a ..."`
+2. Items claim those regions: `grid-area: featured`
+
+When that contract breaks at a smaller breakpoint — the container drops to single-column and
+`grid-template-areas` is removed, but items still declare `grid-area: featured` — the named
+value becomes unresolved. The CSS specification says unresolved named areas fall back to
+auto-placement. **Safari iOS does not reliably implement this fallback.** Items can all be placed
+at row 1, column 1 — stacked on top of each other — rather than flowing down the column.
+
+**Why this makes content invisible, not just mis-ordered:**
+
+When all items stack at row 1, column 1, the explicit grid row auto-sizes from its intrinsic
+content. If all children of the grid items are `position: absolute`, those children are removed
+from normal flow and contribute zero intrinsic height to their grid container. The row height
+collapses to 0px. The section background fills the viewport — appearing as a solid blank area
+with no content of any kind.
+
+**Why desktop masks the problem:**
+
+Desktop defines `grid-template-areas` explicitly. All named areas resolve correctly. Items are
+placed in distinct rows and columns with defined dimensions. The failure only occurs when
+`grid-template-areas` is absent and named values become unresolved — which only happens at the
+mobile breakpoint.
+
+---
+
+### Example Failure Pattern
+
+```css
+/* Desktop — multi-column editorial grid with named areas */
+.gallery {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-auto-rows: 300px;
+  grid-template-areas:
+    "featured   portrait-a  portrait-b"
+    "featured   landscape   landscape"
+    "portrait-c landscape   landscape";
+}
+
+/* Items claim named areas */
+.photo--featured   { grid-area: featured; }
+.photo--portrait-a { grid-area: portrait-a; }
+
+/* Image fill — absolutely positioned children */
+.photo { position: relative; }
+.photo__img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+```
+
+```css
+/* Mobile breakpoint — single column, grid-template-areas removed */
+@media (max-width: 899px) {
+  .gallery {
+    grid-template-columns: 1fr;
+    /* grid-template-areas: intentionally absent for single column */
+  }
+
+  /* BUG: .photo--featured still has grid-area: featured
+     Safari iOS may not resolve this to auto-placement.
+     All items may stack at row 1, col 1.
+     Children are position: absolute → contribute 0 intrinsic height.
+     Row auto-sizes to 0px. Section appears blank black. */
+}
+```
+
+### Intrinsic Height Collapse — The Chain of Events
+
+The failure requires this specific combination:
+
+1. **Named `grid-area` with no matching `grid-template-areas`** → Safari may mis-place all items at the same cell
+2. **Grid container uses implicit or auto row sizing** → collapsed items auto-size the row from content
+3. **All grid item children are `position: absolute`** → children are out of normal flow; contribute 0 intrinsic height
+4. **Grid item has no explicit `height` or `min-height`** → height collapses to 0px
+5. **Section background colour fills the space** → visually: solid background with no content
+
+Any one of these conditions missing breaks the chain. If children are in normal flow, they
+contribute intrinsic height and the collapse doesn't occur. If items have a `min-height`, the
+floor overrides the collapse. The failure requires all five conditions simultaneously — which is
+exactly the pattern used in image-fill grid layouts.
+
+---
+
+### Safe Mobile Fallback Pattern
+
+When switching from a named-area desktop grid to a single-column mobile layout, always:
+
+1. Explicitly reset `grid-area` to `auto` on all named items at the mobile breakpoint
+2. Set a `min-height` floor independent of intrinsic content height
+3. Apply both overrides at the same breakpoint that removes `grid-template-areas`
+
+```css
+/* ============================================================
+   GRID NAMED-AREA MOBILE SAFETY RESET
+   Required when desktop uses grid-template-areas and grid item
+   children are position: absolute (image-fill pattern).
+   ============================================================ */
+@media (max-width: 899px) {
+  .gallery {
+    grid-template-columns: 1fr;
+    /* grid-template-areas intentionally absent — single column */
+  }
+
+  /* Reset all named grid-area items to auto-placement.
+     Safari iOS does not reliably fall back unresolved named areas.
+     min-height prevents collapse when children are position: absolute. */
+  .photo {
+    grid-area: auto;
+    min-height: 240px;
+  }
+}
+```
+
+`grid-area: auto` forces the browser to ignore the named assignment and use normal auto-placement.
+`min-height: 240px` guarantees a height floor that does not depend on child intrinsic height —
+safe regardless of whether children are in normal flow or absolutely positioned.
+
+---
+
+### When `!important` Is Required
+
+If scroll-driven animation resets are applied in the same mobile block (common — both failure
+modes can coexist on the same element), the `@supports (animation-timeline: scroll())` block can
+override your mobile resets depending on cascade order. Use `!important` on animation-related
+properties to guarantee the mobile block wins.
+
+```css
+@media (max-width: 899px) {
+  .photo {
+    grid-area: auto;
+    min-height: 240px;
+    animation: none !important;
+    animation-timeline: auto !important;   /* shorthand may not reset sub-properties in all browsers */
+    animation-range: normal !important;    /* explicit reset required */
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: none !important;
+  }
+}
+```
+
+Note: `animation: none` shorthand does **not** reliably reset `animation-timeline` and
+`animation-range` sub-properties in all browsers. Explicitly reset them both.
+
+---
+
+### QA Checklist — Grid Named-Area Layouts
+
+Any page using `grid-template-areas` where grid item children are `position: absolute`
+(the image-fill pattern) must pass this checklist before marking the page complete.
+
+#### On-device or real-viewport runtime test
+
+At 375px, 390px, 414px, and 430px:
+
+- [ ] All grid items are visible — not collapsed to 0px height
+- [ ] Items stack in predictable single-column flow, not overlapping
+- [ ] Section does not show a solid background with no content
+- [ ] Computed `height` on grid items is > 0px (inspect in DevTools)
+
+#### CSS review
+
+- [ ] All `grid-area: <named-value>` rules have a `grid-area: auto` override at the mobile breakpoint
+- [ ] All grid items that use `position: absolute` children have a `min-height` floor at mobile
+
+#### Principle
+
+> A named `grid-area` value with no matching `grid-template-areas` is an unresolved CSS
+> contract. Do not assume browsers implement the fallback consistently — Safari iOS is a
+> confirmed production counterexample. Always explicitly reset `grid-area: auto` at the
+> breakpoint where `grid-template-areas` is removed.
+
+---
+
 ## Scroll-Driven Animation on Mobile
 
 ### The Production Failure Pattern
