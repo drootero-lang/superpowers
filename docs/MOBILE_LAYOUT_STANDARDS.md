@@ -410,6 +410,201 @@ which element is causing overflow.
 
 ---
 
+## Scroll-Driven Animation on Mobile
+
+### The Production Failure Pattern
+
+Scroll-driven reveal animations that begin at `opacity: 0` can render entire page sections
+invisible on mobile, even when desktop layouts appear perfectly correct. This is not a
+theoretical risk — it was encountered in production on a gallery page and is easy to miss
+in a layout-only audit.
+
+**Why desktop masks the problem:**
+
+On desktop, the editorial grid is compact. Images are near or at the viewport on load,
+the scroll distance to trigger the reveal is short, and the animation fires within the
+first scroll interaction. Everything appears to work.
+
+**Why mobile fails:**
+
+Single-column stacking dramatically increases the total scroll height of a section. A
+gallery that spans ~800px at desktop with a 3-column grid may span 2200px+ at mobile
+with single-column 240px rows. Elements deep in the stack are far from the viewport
+when the page loads. With `animation-fill-mode: both` and `from { opacity: 0 }`, every
+element below the fold is invisible. The section background colour shows through —
+appearing as a solid dark/black area with no content.
+
+Layout audits alone cannot catch this. **Runtime viewport testing at each target width
+is required.**
+
+---
+
+### The Specific CSS Risk
+
+This failure mode is triggered by the combination of:
+
+```css
+@supports (animation-timeline: scroll()) {
+  @keyframes reveal {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .section-item {
+    animation: reveal linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 28%;
+  }
+}
+```
+
+**Why elements stay invisible:**
+
+`animation-fill-mode: both` applies the `from` keyframe state before the animation
+range begins. `entry 0%` is the moment the element's top edge reaches the viewport's
+bottom edge. Until that exact scroll position is reached, the element is at `opacity: 0`.
+
+On a 240px tall mobile tile:
+- `entry 28%` = 67px scrolled into view
+- The element is invisible until 67px of it is visible
+
+For elements 1000px below the fold, the user must scroll all the way to each individual
+tile before it becomes visible. The section appears blank on first reach.
+
+**The `@supports` guard does not protect against this.** It correctly prevents the
+animation from applying on non-supporting browsers, but on Chrome 115+ and Safari 18+
+(which do support `animation-timeline`) the guard passes and the failure occurs. The
+guard only tells you whether the feature is available — not whether it is safe at all
+viewport sizes.
+
+---
+
+### Mobile Standard: Disable Scroll-Driven Reveals Below the Editorial Threshold
+
+Scroll-driven reveal animations are a desktop editorial effect. On mobile and tablet,
+immediate content visibility must take priority.
+
+**Default rule:** Disable scroll-driven opacity reveals at ≤899px (or whatever
+breakpoint marks the transition from your multi-column editorial layout to
+single-column or 2-column stacking).
+
+```css
+/* ============================================================
+   SCROLL-DRIVEN ANIMATION MOBILE OVERRIDE
+   Cancel opacity-based reveal on mobile/tablet where single-
+   column stacking makes sections invisible before interaction.
+   Desktop editorial grid retains the reveal effect.
+   ============================================================ */
+@media (max-width: 899px) {
+  .section-item {
+    animation: none;
+    opacity: 1;
+  }
+}
+```
+
+**The threshold is the editorial layout breakpoint.** If your 3-column masonry
+starts at ≥900px, disable the reveal at ≤899px. The reveal is an enhancement for
+a compact editorial composition — it is not appropriate for a 2200px single-column
+stack where the user cannot predict which scroll position makes content appear.
+
+**Exceptions require deliberate design:**
+
+Only retain scroll-driven reveals below 900px when:
+
+1. The animation has been runtime-tested at 375px, 390px, 414px, and 430px
+2. Content is visible before the user needs to scroll for it (no below-fold reveals)
+3. The timing is short enough that nothing remains hidden for more than ~50px of scroll
+
+---
+
+### Reduced Motion: Reset the Container, Not Just the Children
+
+The `prefers-reduced-motion` block must target **both** the animated container and its
+children. The most common mistake is resetting child elements (images, captions) while
+leaving the parent container's animation intact.
+
+#### The bug
+
+```css
+/* WRONG — container .section-item still has opacity: 0 from scroll animation.
+   Cancelling .section-item__img has no effect if the parent is invisible. */
+@media (prefers-reduced-motion: reduce) {
+  .section-item__img {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+}
+```
+
+#### The correct pattern
+
+```css
+/* CORRECT — cancel the container animation AND restore its opacity.
+   Then cancel child animations for completeness. */
+@media (prefers-reduced-motion: reduce) {
+  .section-item {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  .section-item__img,
+  .section-item__caption {
+    animation: none !important;
+    transition: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+```
+
+**Always trace the opacity chain from the root container down** when writing reduced
+motion resets. If the container is `opacity: 0`, no child rule can make content visible.
+
+---
+
+### Mandatory QA Checklist — Animation Systems
+
+Any page that uses scroll-driven animations, opacity reveals, or `animation-timeline`
+must be tested with the following checklist **before marking the page complete.**
+
+Layout review and CSS structure review are not substitutes for this checklist.
+
+#### Runtime visibility check
+
+At each of the following widths, scroll the full page from top to bottom:
+
+| Width | Device reference |
+|-------|-----------------|
+| 375px | iPhone SE, oldest common viewport |
+| 390px | iPhone 14 / 15 Pro |
+| 414px | iPhone 11, XR, XS Max |
+| 430px | iPhone 14 Plus / 15 Plus |
+
+For each section that uses animated reveals, verify:
+
+- [ ] Content is visible **before** the user begins scrolling to it
+- [ ] No section shows a solid background colour with no content
+- [ ] Scrolling to a section reveals content **within 50px of first scroll contact**
+- [ ] No content remains permanently hidden (scroll to page bottom and confirm all sections rendered)
+
+#### Reduced motion check
+
+Enable `prefers-reduced-motion: reduce` in the browser or OS, reload, and verify:
+
+- [ ] All content is immediately visible without any scrolling
+- [ ] No containers are at `opacity: 0` (inspect computed styles if in doubt)
+- [ ] No transforms shift content off-screen
+
+#### Principle
+
+> Layout audits are insufficient for animation systems. Runtime viewport testing
+> is required. A section that appears correctly structured in CSS can be completely
+> invisible to users at specific viewport sizes if scroll-driven opacity state is
+> not explicitly reset.
+
+---
+
 ## File Organisation Convention
 
 Each page or section CSS file should have a clearly marked mobile override block
